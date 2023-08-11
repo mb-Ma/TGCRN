@@ -1,13 +1,7 @@
 import torch
 import torch.nn as nn
-from model.DKGRNNCell import DKGRNNCell
-from model.DKGRNNCell import GRUCell, TimeEncode, time_encoding, Time2Vec
-import numpy as np
+from model.GCGRU import GCGRU, GRUCell, TimeEncode, time_encoding, Time2Vec
 import torch.nn.functional as F
-import sys
-from model.KGCN import KGCN
-from script.dataloader import load_pickle
-
 
 
 class Encoder(nn.Module):
@@ -21,12 +15,11 @@ class Encoder(nn.Module):
         self.per_flag = per_flag
         self.time_station = time_station
         self.num_layers = num_layers
-        self.dkgrnn_cells = nn.ModuleList()
+        self.gcgru_cells = nn.ModuleList()
 
-        # 第一层的输入和后续层的输入维度不一样，需要单独设置一个
-        self.dkgrnn_cells.append(DKGRNNCell(node_num, in_dim, out_dim, cheb_k, embed_dim, time_station, per_flag))
+        self.gcgru_cells.append(GCGRU(node_num, in_dim, out_dim, cheb_k, embed_dim, time_station, per_flag))
         for _ in range(1, num_layers):
-            self.dkgrnn_cells.append(DKGRNNCell(node_num, out_dim, out_dim, cheb_k, embed_dim, time_station, per_flag))
+            self.gcgru_cells.append(GCGRU(node_num, out_dim, out_dim, cheb_k, embed_dim, time_station, per_flag))
 
     def forward(self, x, init_state, node_embeddings):
         #shape of x: (B, T, N, D)
@@ -53,29 +46,27 @@ class Encoder(nn.Module):
             p = (p1 + p2) / 2.
         else:
             p = None
-        # import pdb; pdb.set_trace()
         for i in range(self.num_layers):
-            # 当前层使用上一层时刻的隐状态作为输入
             state = init_state[i]
             inner_states = []
-            # 编解码时刻
+            # encoding
             for t in range(seq_length):
-                # 输入x_t, stat_t(第一个时刻使用初始隐状态)，node_embedding
+                
                 if self.od_flag:
-                    state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, (od[:,t,:,:], do[:,t,:,:]))
+                    state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, (od[:,t,:,:], do[:,t,:,:]))
                 elif self.time_station:
                     if self.g_d == 'asym':
-                        state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, (node1[:,t,:,:], node2[:,t,:,:]))
+                        state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, (node1[:,t,:,:], node2[:,t,:,:]))
                     else:
                         if t == 0:
-                            state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,0,:], t_embed[:,0,:], p))
+                            state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,0,:], t_embed[:,0,:], p))
                         else:
-                            state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,t,:], t_embed[:,t-1,:], p))
+                            state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,t,:], t_embed[:,t-1,:], p))
                 else:
-                    state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, node_embeddings)
+                    state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, node_embeddings)
                 inner_states.append(state)
-            current_inputs = torch.stack(inner_states, dim=1) # 当前层所有时刻的输出隐状态 （B,T,N,Hidden_dim）
-            output_hidden.append(state) # 保存每层最后一个时刻的隐状态 (B, N, Hidden_dim)
+            current_inputs = torch.stack(inner_states, dim=1) #（B,T,N,Hidden_dim）
+            output_hidden.append(state) # (B, N, Hidden_dim)
         #current_inputs: the outputs of last layer: (B, T, N, hidden_dim)
         #output_hidden: the last state for each layer: (num_layers, B, N, hidden_dim)
         #last_state: (B, N, hidden_dim)
@@ -84,8 +75,7 @@ class Encoder(nn.Module):
     def init_hidden(self, batch_size):
         init_states = []
         for i in range(self.num_layers):
-            # 获取每一层的初始隐状态
-            init_states.append(self.dkgrnn_cells[i].init_hidden_state(batch_size))
+            init_states.append(self.gcgru_cells[i].init_hidden_state(batch_size))
         return torch.stack(init_states, dim=0)
 
 
@@ -94,23 +84,21 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         assert num_layers >= 1, 'At least one DKGRNN layer in the Encoder.'
         self.node_num = node_num
-        self.input_dim = in_dim # run_units+time_embedding
-        self.out_dim = out_dim # 输出维度
+        self.input_dim = in_dim # run_units plus time_embedding
+        self.out_dim = out_dim # output dim
         self.horizon = horizon
         self.num_layers = num_layers
         self.od_flag = od_flag
         self.g_d = g_d
         self.per_flag = per_flag
         self.time_station = time_station
-        self.dkgrnn_cells = nn.ModuleList()
+        self.gcgru_cells = nn.ModuleList()
         
-        # 第一层的输入和后续层的输入维度不一样，解码时加入了时间嵌入表示，需要单独设置一个
-        self.dkgrnn_cells.append(DKGRNNCell(node_num, in_dim, rnn_units, cheb_k, embed_dim, time_station, per_flag))
+        self.gcgru_cells.append(GCGRU(node_num, in_dim, rnn_units, cheb_k, embed_dim, time_station, per_flag))
         for _ in range(1, num_layers):
-            self.dkgrnn_cells.append(DKGRNNCell(node_num, rnn_units, rnn_units, cheb_k, embed_dim, time_station, per_flag))
+            self.gcgru_cells.append(GCGRU(node_num, rnn_units, rnn_units, cheb_k, embed_dim, time_station, per_flag))
         
         self.end_out = nn.Linear(rnn_units, out_dim)
-
         self.mlp1 = nn.Linear(in_dim,1)
 
     def forward(self, x, init_state, node_embeddings):
@@ -134,26 +122,24 @@ class Decoder(nn.Module):
             p = None
 
         for i in range(self.num_layers):
-            # 当前层使用上一层的隐状态作为输入，这样达到不同层交互的功能。
             state = init_state[i]
             inner_states = []
-            # 编解码时刻
-            for t in range(self.horizon):
-                # 这样使用其实是不合理的, the encoder 
-                # 输入x_t, stat_t(第一个时刻使用初始隐状态)，node_embedding
+
+            for t in range(self.horizon): 
+                # node_embedding
                 if self.time_station:
                     if self.g_d == "asym":
-                        state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, (node1[:,t,:,:], node2[:,t,:,:]))
+                        state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, (node1[:,t,:,:], node2[:,t,:,:]))
                     else:
                         if t == 0:
-                            state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,0,:], t_embed[:,0,:], p))
+                            state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,0,:], t_embed[:,0,:], p))
                         else:
-                            state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,t,:], t_embed[:,t-1,:], p))
+                            state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, (node_embeddings, t_embed[:,t,:], t_embed[:,t-1,:], p))
                 else:
-                    state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state, node_embeddings)
+                    state = self.gcgru_cells[i](current_inputs[:, t, :, :], state, node_embeddings)
                 inner_states.append(state)
-            current_inputs = torch.stack(inner_states, dim=1) # 当前层所有时刻的输出隐状态 （B,T,N,Hidden_dim）
-            output_hidden.append(state) # 保存每层最后一个时刻的隐状态 (B, N, Hidden_dim)
+            current_inputs = torch.stack(inner_states, dim=1) # （B,T,N,Hidden_dim）
+            output_hidden.append(state) # (B, N, Hidden_dim)
         #current_inputs: the outputs of last layer: (B, T, N, hidden_dim)
         #output_hidden: the last state for each layer: (num_layers, B, N, hidden_dim)
         #last_state: (B, N, hidden_dim)
@@ -163,8 +149,7 @@ class Decoder(nn.Module):
     def init_hidden(self, batch_size):
         init_states = []
         for i in range(self.num_layers):
-            # 获取每一层的初始隐状态
-            init_states.append(self.dkgrnn_cells[i].init_hidden_state(batch_size))
+            init_states.append(self.gcgru_cells[i].init_hidden_state(batch_size))
         return torch.stack(init_states, dim=0)
 
 
@@ -173,16 +158,16 @@ class Decoder_WOG(nn.Module):
         super(Decoder_WOG, self).__init__()
         assert num_layers >= 1, 'At least one DKGRNN layer in the Encoder.'
         self.input_dim = in_dim # run_units+time_embedding
-        self.out_dim = out_dim # 输出维度
+        self.out_dim = out_dim # output dim
         self.horizon = horizon
         self.node_num = node_num
         self.num_layers = num_layers
-        self.dkgrnn_cells = nn.ModuleList()
+        self.gru_cells = nn.ModuleList()
         
-        # 第一层的输入和后续层的输入维度不一样，解码时加入了时间嵌入表示，需要单独设置一个
-        self.dkgrnn_cells.append(GRUCell(in_dim, rnn_units))
+        # the input dim of first layer is different from the reminder layers
+        self.gru_cells.append(GRUCell(in_dim, rnn_units))
         for _ in range(1, num_layers):
-            self.dkgrnn_cells.append(GRUCell(rnn_units, rnn_units))
+            self.gru_cells.append(GRUCell(rnn_units, rnn_units))
         
         self.end_out = nn.Linear(rnn_units, out_dim)
 
@@ -194,17 +179,14 @@ class Decoder_WOG(nn.Module):
         output_hidden = []
 
         for i in range(self.num_layers):
-            # 当前层使用上一层的隐状态作为输入，这样达到不同层交互的功能。
             state = init_state[i]
             inner_states = []
-            # 编解码时刻
+            
             for t in range(self.horizon):
-                # 这样使用其实是不合理的,
-                # 输入x_t, stat_t(第一个时刻使用初始隐状态)，node_embedding
-                state = self.dkgrnn_cells[i](current_inputs[:, t, :, :], state)
+                state = self.gru_cells[i](current_inputs[:, t, :, :], state)
                 inner_states.append(state)
-            current_inputs = torch.stack(inner_states, dim=1) # 当前层所有时刻的输出隐状态 （B,T,N,Hidden_dim）
-            output_hidden.append(state) # 保存每层最后一个时刻的隐状态 (B, N, Hidden_dim)
+            current_inputs = torch.stack(inner_states, dim=1) # （B,T,N,Hidden_dim）
+            output_hidden.append(state) # (B, N, Hidden_dim)
         #current_inputs: the outputs of last layer: (B, T, N, hidden_dim)
         #output_hidden: the last state for each layer: (num_layers, B, N, hidden_dim)
         #last_state: (B, N, hidden_dim)
@@ -213,35 +195,26 @@ class Decoder_WOG(nn.Module):
 
 
 
-class DKGCN(nn.Module):
+class TGCRN(nn.Module):
     def __init__(self, args):
-        super(DKGCN, self).__init__()
+        super(TGCRN, self).__init__()
         self.args = args
         self.num_nodes = args.num_nodes
-        self.input_dim = args.input_dim # 原始数据维度
-        self.time_dim = args.time_dim # 时间嵌入维度
-        self.rnn_units = args.rnn_units # 隐层状态维度
-        self.output_dim = args.output_dim # 预测输出维度
-        self.horizon = args.horizon # 预测输出长度
+        self.input_dim = args.input_dim # input dim
+        self.time_dim = args.time_dim # time embedding dim
+        self.rnn_units = args.rnn_units # hidden state dim
+        self.output_dim = args.output_dim # output dim
+        self.horizon = args.horizon # output len
         self.num_layers = args.num_layers # network layer
-        self.embed_dim = args.embed_dim # 节点嵌入维度
+        self.embed_dim = args.embed_dim # node embedding dim
         self.cheb_k = args.cheb_k
 
-        if args.node_mode == 'kgr':
-            # load entity and filter station embedding matrix
-            stat_embed = np.load(args.kg_ent)["arr_0"][3:83]
-            stat_embed = torch.Tensor(stat_embed).to(args.device)
-            self.node_embeddings = nn.Parameter(stat_embed, requires_grad=True)
-        elif args.node_mode == 'kgc':
-            # knowledge graph convolution
-            self.kgc = KGCN(args.num_ent, args.num_rel, args.embed_dim, args.n_neighbor)
-        else:
-            # random representation
-            if args.graph_direction == "symm":
-                self.node_embeddings = nn.Parameter(torch.randn(self.num_nodes, args.embed_dim), requires_grad=True)
-            if args.graph_direction == "asym":
-                self.node_embeddings1 = nn.Parameter(torch.randn(self.num_nodes, args.embed_dim), requires_grad=True)
-                self.node_embeddings2 = nn.Parameter(torch.randn(self.num_nodes, args.embed_dim), requires_grad=True)
+        # random representation for node
+        if args.graph_direction == "symm":
+            self.node_embeddings = nn.Parameter(torch.randn(self.num_nodes, args.embed_dim), requires_grad=True)
+        if args.graph_direction == "asym":
+            self.node_embeddings1 = nn.Parameter(torch.randn(self.num_nodes, args.embed_dim), requires_grad=True)
+            self.node_embeddings2 = nn.Parameter(torch.randn(self.num_nodes, args.embed_dim), requires_grad=True)
         
         # embedding weight
         self.node_weight = nn.Parameter(torch.randn(args.embed_dim, args.embed_dim), requires_grad=True)
@@ -254,18 +227,16 @@ class DKGCN(nn.Module):
             # self.time_embed = TimeEncode(args.time_dim) # 2020 ICLR
             self.time_embed = time_encoding(args.time_dim) # 2019 NIPS
             # self.time_embed = Time2Vec(args.time_dim) # time2vec
-            # self.input_dim += self.args.time_dim # 更新输入数据维度
 
         # node representation with time info
         if args.time_station:
             self.embed_dim += self.time_dim
 
-        # 逐步编码
-
+        # encoder
         self.encoder = Encoder(self.num_nodes, self.input_dim, self.rnn_units, self.cheb_k,
                                 self.embed_dim, self.num_layers, args.od_flag, args.time_station, args.graph_direction, args.period)
         
-        # 逐步解码
+        # decoder
         if args.Seq_Dec:
             if args.time_embedding:
                 # self.input_dim = self.rnn_units + self.time_dim
@@ -290,9 +261,8 @@ class DKGCN(nn.Module):
         else:
             input: X
         """
-        if self.args.time_embedding and self.args.node_mode=="kgc":
-            _input, x_time, y_time, adj_ent, adj_rel = _input
-        elif self.args.time_embedding and self.args.constrative_time and self.training:
+        
+        if self.args.time_embedding and self.args.constrative_time and self.training:
             _input, x_time, y_time, cons_time= _input
         elif self.args.time_embedding:
             if self.args.od_flag:
@@ -307,24 +277,13 @@ class DKGCN(nn.Module):
             x_time_feat = self.time_embed(x_time)
             y_time_feat = self.time_embed(y_time)
 
-            # 拼接时间特征与原始输入
-            # _input = torch.cat((_input, torch.unsqueeze(x_time_feat, dim=2).repeat(1, 1, _input.size(2), 1)), dim=-1)
-
-        # get the station embedding
-        if self.args.node_mode == "kgc":
-            idx = torch.tensor(list(range(self.args.num_nodes))).to(_input.device)
-            self.node_embeddings = self.kgc(idx, adj_ent, adj_rel)
-
         # add node embedding constrains. 
-        # node = self.node_embeddings
         node = F.tanh(torch.mm(self.node_embeddings, self.node_weight))
-        # x_time_feat = F.tanh(torch.bmm(x_time_feat, self.time_weight))
-        # y_time_feat = F.tanh(torch.bmm(y_time_feat, self.time_weight))
 
-        # 初始化隐状态
+        # init hidden states
         init_state = self.encoder.init_hidden(_input.shape[0])
 
-        # 获取最后一层所有时刻的隐状态，所有层最后一个时刻的隐状态
+        # get the last hidden states from the last layer and every layer
         if self.args.od_flag:
             output, _ = self.encoder(_input, init_state, (od, do)) # output: [B, T, N, hidden]
         elif self.args.time_station:
@@ -340,12 +299,9 @@ class DKGCN(nn.Module):
         else:
             output, _ = self.encoder(_input, init_state, self.node_embeddings) # output: [B, T, N, hidden]
     
-        # 解码部分
+        # decoding
         if self.args.Seq_Dec:
             init_state = self.decoder.init_hidden(_input.shape[0])
-
-            # if self.args.time_embedding:
-                # output = torch.cat((output, y_time_feat.unsqueeze(dim=2).repeat(1, 1, output.size(2), 1)), dim=-1)
             
             if self.args.od_flag:
                 outs = self.decoder(output, _)

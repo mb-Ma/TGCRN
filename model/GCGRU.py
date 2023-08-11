@@ -129,7 +129,7 @@ class ChebGCN(nn.Module):
         A = F.softmax(F.relu(torch.mm(node_embeddings, node_embeddings.transpose(0, 1))), dim=1)
         support_set = [torch.eye(node_num).to(A.device), A]
         
-        for k in range(2, self.cheb_k): # 当k=1时，就变为了GCN
+        for k in range(2, self.cheb_k):
             support_set.append(torch.matmul(2 * A, support_set[-1]) - support_set[-2])
         cheb_supports = torch.stack(support_set, dim=0)
         weights = torch.einsum('nd,dkio->nkio', node_embeddings, self.weights_pool)  #N, cheb_k, dim_in, dim_out
@@ -141,12 +141,12 @@ class ChebGCN(nn.Module):
         return x_gconv
 
 
-class DKGCN(nn.Module):
+class TGCN(nn.Module):
     """
     ChebNet with node_embeddings [batch, node, dim]
     """
     def __init__(self, in_dim, out_dim, cheb_k, embed_dim, period=False):
-        super(DKGCN, self).__init__()
+        super(TGCN, self).__init__()
         self.cheb_k = cheb_k
         # learned weights
         self.weights_pool = nn.Parameter(torch.FloatTensor(embed_dim, cheb_k, in_dim, out_dim))
@@ -178,8 +178,8 @@ class DKGCN(nn.Module):
         # A = F.softmax(F.relu(_a), dim=2)
         I = torch.eye(node_num).repeat(x.size(0), 1, 1).to(A.device)
         support_set = [I, A]
-        # for k in range(2, self.cheb_k): # 当k=1时，就变为了GCN
-        #     support_set.append(torch.matmul(2 * A, support_set[-1]) - support_set[-2])
+        for k in range(2, self.cheb_k):
+            support_set.append(torch.matmul(2 * A, support_set[-1]) - support_set[-2])
         
         # node represention and time represenation
         node_embeddings = node_embeddings.repeat(x.size(0), 1, 1)
@@ -190,7 +190,6 @@ class DKGCN(nn.Module):
         bias = torch.matmul(node_embeddings, self.bias_pool)                       #B, N, dim_out
         x_g = torch.einsum("bknm,bmc->bknc", cheb_supports, x)      #B, cheb_k, N, dim_in
         x_g = x_g.permute(0, 2, 1, 3)  # B, N, cheb_k, dim_in
-
         x_gconv = torch.einsum('bnki,bnkio->bno', x_g, weights) + bias     #b, N, dim_out
 
         return x_gconv
@@ -277,35 +276,32 @@ class ODGCN(nn.Module):
 
         return out
 
-class DKGRNNCell(nn.Module):
+class GCGRU(nn.Module):
     """
     RNNCell, 
     """
     def __init__(self, node_num, dim_in, dim_out, cheb_k, embed_dim, time_with_station=False, per_flag=False):
-        super(DKGRNNCell, self).__init__()
+        super(GCGRU, self).__init__()
         self.node_num = node_num
         self.time_with_station = time_with_station
-        self.hidden_dim = dim_out # 之所以加在一起，因为一个gate和update当作两个使用
+        self.hidden_dim = dim_out
 
         if time_with_station:
-            self.gate = DKGCN(dim_in+self.hidden_dim, 2*dim_out, cheb_k, embed_dim, period=per_flag) # 输出维度为2*dim_out
-            self.update = DKGCN(dim_in+self.hidden_dim, dim_out, cheb_k, embed_dim, period=per_flag)
+            self.gate = TGCN(dim_in+self.hidden_dim, 2*dim_out, cheb_k, embed_dim, period=per_flag) # 2*dim_out
+            self.update = TGCN(dim_in+self.hidden_dim, dim_out, cheb_k, embed_dim, period=per_flag)
         else:
-            self.gate = ChebGCN(dim_in+self.hidden_dim, 2*dim_out, cheb_k, embed_dim) # 输出维度为2*dim_out
+            self.gate = ChebGCN(dim_in+self.hidden_dim, 2*dim_out, cheb_k, embed_dim) # 2*dim_out
             self.update = ChebGCN(dim_in+self.hidden_dim, dim_out, cheb_k, embed_dim)
-        
-        # self.gate = AsymGCN(dim_in+self.hidden_dim, 2*dim_out, cheb_k) # 输出维度为2*dim_out
-        # self.update = AsymGCN(dim_in+self.hidden_dim, dim_out, cheb_k)
 
     def forward(self, x, state, node_embeddings):
         """
         DKGRNCell
         given kg do kgc, missing the periodic modeling, h_t
         1. $$h_t = z_t \odot h_{t-1} + (1-z_t) \odot \hat{h_t}$$ 
-        2. $$\hat{h_t} = tanh(A[X_{:,t}, r \odot h_{t-1}]EW_{\hat{h}} + Eb_{\hat{h}})$$ 其中A和E表示着图卷积
+        2. $$\hat{h_t} = tanh(A[X_{:,t}, r \odot h_{t-1}]EW_{\hat{h}} + Eb_{\hat{h}})$$ 
         3. r_t = sigmoid(A[X_{:,t}, h_{t-1}]EW_r + Eb_r)
         4. z_t = sigmoid(A[X_{:,t}, h_{t-1}]EW_z + Eb_z)
-        5. 图卷积计算公式
+        5. graph convolution
         """
         #x: B, num_nodes, input_dim(x, time_embedding)
         if self.time_with_station:
@@ -316,10 +312,10 @@ class DKGRNNCell(nn.Module):
         input_and_state = torch.cat((x, state), dim=-1) # [b, n, dim_in_+dim_out]
         # 2. z_t   gate mechanism
         if self.time_with_station:
-            z_r = torch.sigmoid(self.gate(input_and_state, (node_embeddings, t, n_t, p))) # 因为z,r计算是相同的，所以使用一种方式计算即可，output dim: b, n, dim_out
+            z_r = torch.sigmoid(self.gate(input_and_state, (node_embeddings, t, n_t, p))) # output dim: b, n, dim_out
         else:
             z_r = torch.sigmoid(self.gate(input_and_state, node_embeddings))
-        z, r = torch.split(z_r, self.hidden_dim, dim=-1) # 按照输出的特征维度切分，最后一份是z[b, n, dim_out]， r[b, n, dim_out]
+        z, r = torch.split(z_r, self.hidden_dim, dim=-1) # z[b, n, dim_out]， r[b, n, dim_out]
         # 3. 
         candidate = torch.cat((x, r*state), dim=-1)
         # 5. update mechanism \hat{h_t}
@@ -341,7 +337,7 @@ class GRUCell(nn.Module):
     """
     def __init__(self, dim_in, dim_out):
         super(GRUCell, self).__init__()
-        self.hidden_dim = dim_out # 之所以加在一起，因为一个gate和update当作两个使用
+        self.hidden_dim = dim_out
         self.W_z_r = nn.Parameter(torch.FloatTensor(dim_in+dim_out, 2*dim_out))
         self.b_z_r = nn.Parameter(torch.FloatTensor(2*dim_out))
         self.W_h = nn.Parameter(torch.FloatTensor(dim_in+dim_out, dim_out))
@@ -352,10 +348,10 @@ class GRUCell(nn.Module):
         DKGRNCell
         given kg do kgc, missing the periodic modeling, h_t
         1. $$h_t = z_t \odot h_{t-1} + (1-z_t) \odot \hat{h_t}$$ 
-        2. $$\hat{h_t} = tanh(A[X_{:,t}, r \odot h_{t-1}]EW_{\hat{h}} + Eb_{\hat{h}})$$ 其中A和E表示着图卷积
+        2. $$\hat{h_t} = tanh(A[X_{:,t}, r \odot h_{t-1}]EW_{\hat{h}} + Eb_{\hat{h}})$$ 
         3. r_t = sigmoid([X_{:,t}, h_{t-1}]W_r + b_r)
         4. z_t = sigmoid([X_{:,t}, h_{t-1}]W_z + b_z)
-        5. 图卷积计算公式
+        5. graph convolution
         """
         #x: B, num_nodes, input_dim(x, time_embedding)
         #state: B, num_nodes, hidden_dim : h_{t-1}
@@ -364,7 +360,7 @@ class GRUCell(nn.Module):
         input_and_state = torch.cat((x, state), dim=-1) # [b, n, dim_in_+dim_out]
         # 2. z_t   gate mechanism
         z_r = torch.einsum("io,bni->bno", self.W_z_r, input_and_state) + self.b_z_r
-        z, r = torch.split(z_r, self.hidden_dim, dim=-1) # 按照输出的特征维度切分，最后一份是z[b, n, dim_out]， r[b, n, dim_out]
+        z, r = torch.split(z_r, self.hidden_dim, dim=-1) # z[b, n, dim_out]， r[b, n, dim_out]
         # 3. 
         candidate = torch.cat((x, r*state), dim=-1)
         # 5. update mechanism \hat{h_t}

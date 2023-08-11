@@ -11,13 +11,11 @@ import numpy as np
 import torch.nn as nn
 import argparse
 from datetime import datetime
-from model.DKGCN import DKGCN as DKGCN
-from model.SODN import SODN
+from model.TGCRN import TGCRN
 from model.Trainer import Trainer
 from script.TrainInits import init_seed, str_to_bool
 from script.dataloader import load_dataset
 from script.TrainInits import print_model_parameters
-# from lib.dataloader import load_pickle
 from script.metrics import MAE_torch
 from script.dataloader import Graph_loader
 
@@ -35,7 +33,6 @@ args.add_argument('--cuda', default=True, type=bool)
 # switch
 args.add_argument('--node_mode', default="random", type=str, help="kgr, kgc, random")
 args.add_argument('--graph_direction', default="symm", type=str, help="symm, asym")
-# args.add_argument('--x_time', default="False", type=str_to_bool, help="if concat input feat with time feat")
 args.add_argument('--constrative_time', default="False", type=str_to_bool, help="if enable constrative learning for time")
 args.add_argument('--ct_factor', default=0.01, type=float, help='constrative loss factor')
 args.add_argument('--period', default="True", type=str_to_bool, help="if enable period function")
@@ -113,7 +110,7 @@ else:
 def main():
     #load dataset
     data = load_dataset(args.dataset, args.normalizer, args.batch_size, args, args.time_embedding)
-    model = DKGCN(args)
+    model = TGCRN(args)
     model = model.to(args.device)
     for p in model.parameters():
         if p.dim() > 1:
