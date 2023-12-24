@@ -31,3 +31,12 @@ python run.py --dataset ../data/taxi --data taxi --lag 12 --horizon 12 --num_nod
 # Bike
 python run.py --dataset ../data/bike --data bike --lag 12 --horizon 12 --num_nodes 250
 ```
+
+# Cite
+
+@inproceedings{ma2024tgcrn,
+  title={Learning Time-aware Graph Structures for Spatially Correlated Time Series Forecasting},
+  author={Ma, Minbo and Hu, Jilin and Jensen, Christian S and Teng, Fei and Han, Peng and Xu, Zhiqiang and Li, Tianrui},
+  booktitle={ICDE},
+  year={2024}
+}
