@@ -1,10 +1,3 @@
-# Welcome ICDE's friends to pay attention to our work :-)
-Due to some issues, I cannot attend the on-site conference.   
-
-Since no one explains the poster, I always pay attention to the message. Any questions are welcome!
-
-05.14.2024
---------------------------------------------------------------------------------------
 # TGCRN
 Time-aware Graph Structure Learning for Spatiao-temporal Forecasting
 
